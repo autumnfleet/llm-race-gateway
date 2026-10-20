@@ -1,0 +1,4 @@
+# llm-race-gateway runtime dependency. The policy, settings and config modules are standard library only;
+# the proxy itself needs LiteLLM with its proxy extra, pinned because the integration relies on
+# LiteLLM internals (see README, Compatibility contract).
+litellm[proxy]==1.106.0
