@@ -29,6 +29,7 @@ _KEYS: Dict[str, tuple] = {
     "TIMEOUT_SECS": (float, 15.0),
     "EMA_ALPHA": (float, 0.3),
     "SHARE": (float, 0.1),
+    "RECHECK_SECS": (float, 600.0),
     "FAILURE_PENALTY_WINDOWS": (float, 2.0),
     "LOG_LEVEL": (str, "INFO"),
 }
@@ -74,6 +75,7 @@ class Settings:
     timeout_secs: float
     ema_alpha: float
     share: float
+    recheck_secs: float
     failure_penalty_windows: float
     log_level: str
 
@@ -130,6 +132,8 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
         raise ConfigError("%sMODEL: %r is not a plain name" % (PREFIX, s.model))
     if not 0.0 <= s.share <= 1.0:
         raise ConfigError("%sSHARE must be in [0, 1], got %r" % (PREFIX, s.share))
+    if s.recheck_secs < 0:
+        raise ConfigError("%sRECHECK_SECS must be >= 0 (0 disables rechecks), got %r" % (PREFIX, s.recheck_secs))
     if not 0.0 < s.ema_alpha <= 1.0:
         raise ConfigError("%sEMA_ALPHA must be in (0, 1], got %r" % (PREFIX, s.ema_alpha))
     if s.first_token_secs <= 0 or s.timeout_secs < s.first_token_secs:

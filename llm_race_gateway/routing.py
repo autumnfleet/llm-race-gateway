@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Any, Mapping, Optional, Set
+from typing import Any, Mapping, Optional, Set, Union
 
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.types.router import CustomRoutingStrategyBase
@@ -61,12 +61,17 @@ def _tried(md: Mapping[str, Any]) -> Set[str]:
     return out
 
 
-def _is_probe(md: Mapping[str, Any]) -> bool:
-    if md.get(PROBE_KEY):
-        return True
+def _probe(md: Mapping[str, Any]) -> Union[bool, str]:
+    """The probe flag: True for "any route but the best", a route name for "that route", else False."""
     # A client's own `metadata` object arrives nested under requester metadata on some paths.
     inner = md.get("requester_metadata")
-    return bool(isinstance(inner, Mapping) and inner.get(PROBE_KEY))
+    for holder in (md, inner if isinstance(inner, Mapping) else {}):
+        value = holder.get(PROBE_KEY)
+        if isinstance(value, str) and value:
+            return value
+        if value:
+            return True
+    return False
 
 
 class EmaRouting(CustomLogger, CustomRoutingStrategyBase):
@@ -109,7 +114,7 @@ class EmaRouting(CustomLogger, CustomRoutingStrategyBase):
             return group[0]  # not the route group (the public model, served by the race provider)
         md = _metadata(request_kwargs)
         tried = _tried(md)
-        name, why = pick(self.ranker.ranked(), [i for i in by_id if i is not None], tried, _is_probe(md), self._rng)
+        name, why = pick(self.ranker.ranked(), [i for i in by_id if i is not None], tried, _probe(md), self._rng)
         log.info("llm_race: %s -> %s (%s; tried=%s; %s)", model, name, why, sorted(tried), self.ranker.describe())
         return by_id[name]
 
@@ -132,8 +137,10 @@ class EmaRouting(CustomLogger, CustomRoutingStrategyBase):
         if name not in self.ranker.names:
             return  # the race provider's own outer call, or something unidentified
         first = kwargs.get("completion_start_time") or end_time
-        secs = max(0.0, (first - self._attempt_start(kwargs, start_time)).total_seconds())
-        self.ranker.observe(name, secs)
+        start = self._attempt_start(kwargs, start_time)
+        secs = max(0.0, (first - start).total_seconds())
+        # Reported when the stream ENDS, which can be long after its first chunk.
+        self.ranker.observe(name, secs, started_ago=max(secs, (end_time - start).total_seconds()))
         # The proxy keeps no spend without a database; the per-request cost lives in this line.
         cost = kwargs.get("response_cost")
         log.info("llm_race: sample %s %.3fs cost=%s; %s", name, secs,

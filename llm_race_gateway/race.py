@@ -2,7 +2,8 @@
 
 The public model is served by this provider. It asks LiteLLM's own router for the route group once,
 or -- on a `share` of requests -- twice, the second marked as a probe so the routing strategy hands
-it a route other than the best. The first stream to yield text or a tool call is passed through;
+it a route other than the best. A route the ranker says is overdue for a measurement (`recheck_secs`)
+is raced on the next request whatever the share, as that request's probe. The first stream to yield text or a tool call is passed through;
 the loser is still read to its own first chunk, timed here, and then closed.
 
 LiteLLM's built-in race (`fastest_response`) was measured and is not used: it cancels the loser
@@ -19,7 +20,7 @@ import asyncio
 import logging
 import random
 import time
-from typing import Any, AsyncIterator, Dict, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Dict, Optional, Set, Tuple, Union
 
 from litellm.llms.custom_llm import CustomLLM
 
@@ -116,19 +117,23 @@ async def _next(it):
 
 class RaceLLM(CustomLLM):
     def __init__(self, inner_group: str, share: float, ranker: Optional[RouteRanker] = None,
-                 rng: Optional[random.Random] = None):
+                 rng: Optional[random.Random] = None, recheck_secs: float = 0.0):
         super().__init__()
         self.inner_group = inner_group
         self.ranker = ranker
         self.share = share
+        self.recheck_secs = recheck_secs
         self._rng = rng or random.Random()
         self._losers: Set[asyncio.Task] = set()
 
-    def _inner_kwargs(self, messages, params: Dict[str, Any], probe: bool) -> Dict[str, Any]:
+    def _inner_kwargs(self, messages, params: Dict[str, Any], probe: Union[bool, str]) -> Dict[str, Any]:
         kw = {k: v for k, v in (params or {}).items() if k not in _NOT_FORWARDED}
         kw.update(model=self.inner_group, messages=messages, stream=True)
         if probe:
-            kw["metadata"] = {PROBE_KEY: True}
+            kw["metadata"] = {PROBE_KEY: probe}
+            # A probe is never retried: its retry would go to the lead's route, ask it twice, and
+            # time it from the probe's start, the failed wait included.
+            kw["num_retries"] = 0
         return kw
 
     async def _contend(self, kwargs) -> Tuple[Any, Any, Any, float]:
@@ -179,10 +184,15 @@ class RaceLLM(CustomLLM):
         else:
             optional_params = {k: v for k, v in (optional_params or {}).items() if k != "max_retries"}
         race = self._rng.random() < self.share
+        probe: Union[bool, str] = True
+        due = self.ranker.claim_recheck(self.recheck_secs) if self.ranker is not None else None
+        if due is not None:
+            race, probe = True, due
+            log.info("llm_race: recheck %s, unmeasured for %.0fs or more", due, self.recheck_secs)
         t0 = time.monotonic()
         tasks = {asyncio.create_task(self._contend(self._inner_kwargs(messages, optional_params, False))): "lead"}
         if race:
-            tasks[asyncio.create_task(self._contend(self._inner_kwargs(messages, optional_params, True)))] = "probe"
+            tasks[asyncio.create_task(self._contend(self._inner_kwargs(messages, optional_params, probe)))] = "probe"
         winner = None
         errors = []
         try:

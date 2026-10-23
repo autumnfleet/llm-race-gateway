@@ -64,7 +64,7 @@ def install_runtime(settings: Settings, routes: List[Route]) -> None:
     ranker = RouteRanker([r.name for r in routes], settings.ema_alpha, settings.first_token_secs)
     runtime.routing = EmaRouting(ranker, settings.first_token_secs, settings.failure_penalty_windows,
                                  priced={r.name for r in routes if r.priced})
-    runtime.race = RaceLLM(settings.routes_group, settings.share, ranker)
+    runtime.race = RaceLLM(settings.routes_group, settings.share, ranker, recheck_secs=settings.recheck_secs)
 
 
 def cmd_check(settings: Settings) -> int:
@@ -72,9 +72,10 @@ def cmd_check(settings: Settings) -> int:
     for r in routes:
         read_route_key(r)  # raises if a configured key cannot be read; the value is not printed
     print("llm-race-gateway %s: %d routes %s; public model %r, routes model %r; first token %.2fs, "
-          "timeout %.1fs, race share %.2f; listen %s:%d" % (
+          "timeout %.1fs, race share %.2f, recheck %.0fs; listen %s:%d" % (
               __version__, len(routes), [r.name for r in routes], settings.model, settings.routes_group,
-              settings.first_token_secs, settings.timeout_secs, settings.share, settings.host, settings.port))
+              settings.first_token_secs, settings.timeout_secs, settings.share, settings.recheck_secs,
+              settings.host, settings.port))
     unpriced = [r.name for r in routes if not r.priced]
     if unpriced:
         print("unpriced routes (cost logged as 'unpriced'): %s" % unpriced)
@@ -88,8 +89,9 @@ def cmd_serve(settings: Settings) -> int:
     os.environ["LITELLM_MASTER_KEY"] = ensure_master_key(settings.master_key_file)
     routes = prepare(settings)
     install_runtime(settings, routes)
-    log.info("llm_race: %s %d routes %s, first token %.2fs, race share %.2f, %s:%d", __version__, len(routes),
-             [r.name for r in routes], settings.first_token_secs, settings.share, settings.host, settings.port)
+    log.info("llm_race: %s %d routes %s, first token %.2fs, race share %.2f, recheck %.0fs, %s:%d", __version__,
+             len(routes), [r.name for r in routes], settings.first_token_secs, settings.share, settings.recheck_secs,
+             settings.host, settings.port)
     from litellm.proxy.proxy_cli import run_server
 
     sys.argv = ["litellm", "--config", str(config_path(settings)), "--host", settings.host,

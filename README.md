@@ -5,6 +5,7 @@ An OpenAI-compatible gateway for latency-critical chat, for example a voice agen
 - **Ranking by first token.** Every answered request is a sample of its route's exponential moving average (EMA) of seconds to the first streamed chunk. The route with the lowest average answers the next request.
 - **Failover inside a window.** A route that sends no chunk within the first-token window is abandoned and the request moves to the next route at once, with no backoff. The miss is recorded as a penalty of at least two windows, so a stalled default is demoted on the spot instead of being averaged away.
 - **Racing a share of requests.** On a configurable share of requests a second route, never the current best, is asked at the same time. The caller hears whichever answers first. The loser is still read to its first chunk and timed, so slower routes keep being measured and a recovered route can win back first place.
+- **Rechecking a demoted route.** A route ranked behind one configured after it, and unmeasured for ten minutes (configurable), is raced on the next real streamed request. No request is ever sent just to measure, so an idle gateway costs nothing. The first answer after a failure replaces the penalty instead of being averaged into it, so one fast answer is enough to win first place back.
 - **Cost per request** in the log, for routes with a configured price. Unpriced routes are logged as `unpriced`, not as free.
 
 It is a [LiteLLM](https://github.com/BerriAI/litellm) proxy with a custom routing strategy, a logging callback and a custom provider for the race. It is not a fork. LiteLLM still owns the HTTP server, auth, key handling and the OpenAI wire format, including streaming, tool calls and usage.
@@ -38,7 +39,7 @@ Python 3.10 to 3.14. Pin a release tag:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/pip install "git+https://github.com/autumnfleet/llm-race-gateway@v0.1.0"
+.venv/bin/pip install "git+https://github.com/autumnfleet/llm-race-gateway@v0.1.1"
 .venv/bin/llm-race-gateway check        # or: python -m llm_race_gateway check
 ```
 
@@ -69,6 +70,7 @@ All settings come from environment variables with the prefix `LLM_RACE_`. They c
 | `LLM_RACE_TIMEOUT_SECS` | `15` | Total budget for one request. |
 | `LLM_RACE_EMA_ALPHA` | `0.3` | Weight of the newest sample in the moving average. |
 | `LLM_RACE_SHARE` | `0.1` | Share of requests to the public model that also race a second route. `0` disables racing. |
+| `LLM_RACE_RECHECK_SECS` | `600` | A demoted route (ranked behind a route configured after it) unmeasured for this long is raced on the next streamed request to the public model (a non-streamed request is never raced). `0` disables rechecks. |
 | `LLM_RACE_FAILURE_PENALTY_WINDOWS` | `2` | A failed or stalled attempt sets the route's average to at least this many windows. |
 | `LLM_RACE_LOG_LEVEL` | `INFO` | Python logging level. |
 | `LLM_RACE_CONFIG_FILE` | unset | Optional KEY=VALUE file (above). |
@@ -105,8 +107,8 @@ Stable within a major version:
 - The HTTP surface. It is LiteLLM's OpenAI-compatible proxy: `POST /v1/chat/completions` (streaming and not), `Authorization: Bearer <master key>`, and `GET /health/liveliness`. The public model is `LLM_RACE_MODEL`, the routes group `<MODEL>-routes`, and `x-litellm-model-id` names the route on direct routes-group calls.
 - What passes through unchanged to the route: the client's request body, minus `model`, `messages`, `stream`, `metadata` and `user`, plus the route's `extra_body`. That includes `max_completion_tokens` under that name, `tools`, `temperature` and `stream_options`.
 - What comes back: text and tool-call deltas as the route sent them, the route's `finish_reason` (including `length`), and the route's own `usage` (including `completion_tokens_details.reasoning_tokens`).
-- The probe flag `{"metadata": {"llm_race_probe": true}}` on a routes-group request, meaning "any route but the best".
-- The policy: the order before any measurement, the penalty floor, no repeat of a tried route while an untried one remains, and a probe never getting the best route.
+- The probe flag `{"metadata": {"llm_race_probe": true}}` on a routes-group request, meaning "any route but the best". Since 0.1.1 the value may also be a route name, meaning "that route", unless it is the best or not served.
+- The policy: the order before any measurement, the penalty floor, the first sample after a failure replacing the penalty (since 0.1.1), rechecks only for demoted routes and only on real requests, no repeat of a tried route while an untried one remains, and a probe never getting the best route.
 
 Not part of the contract: log line wording; the generated LiteLLM config; the Python module API; and the LiteLLM version. It is pinned, and a minor version of this package may move the pin. The integration uses LiteLLM behaviour that is not a public API: `Router.set_custom_routing_strategy`, which is re-installed per request because `routing_strategy_init` resets it; `previous_models` retry breadcrumbs; `api_call_start_time` and `completion_start_time` in callback kwargs; `litellm_params.proxy_server_request`; and the custom-provider stream wrapper. The integration tests pin each of these, so run them before moving the pin.
 
@@ -118,7 +120,7 @@ Not part of the contract: log line wording; the generated LiteLLM config; the Py
 - **Spend totals.** The proxy keeps no spend history without a database. The per-request cost is in the log line `llm_race: sample <route> <secs>s cost=$...`. Add LiteLLM's database or your own callback if you need totals.
 - **Keep local:** the routes file, keys, prices, and the choice of models. None of them belong in this repository.
 
-Known limit: a stalled route is re-measured only when it is picked as a race partner (`LLM_RACE_SHARE`) or when the routes ahead of it fail. With a share of 0.1 and two routes, a route demoted by one stall typically needs a few dozen requests before a probe can show it has recovered.
+Known limit: a recheck happens only while streamed requests arrive, so after a quiet spell a demoted route is re-measured on the first request, not before. A route that is not demoted is measured only by the random share of races, or when the routes ahead of it fail.
 
 ## Tests
 
